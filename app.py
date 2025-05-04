@@ -1,4 +1,4 @@
-# --- START OF app.py (v2.1 - Includes /validate-license endpoint) ---
+# --- START OF app.py (v2.2 - Added import sys) ---
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import random
@@ -12,30 +12,26 @@ from datetime import datetime, timedelta, timezone # For timestamps
 from urllib.parse import urlparse # For parsing DATABASE_URL
 import traceback # For detailed error logging
 from dotenv import load_dotenv # Optional: for local development to load .env file
+import sys # <-- ADDED IMPORT SYS
 
 # --- Load environment variables from .env file for local development ---
-# Create a .env file in the same directory with:
-# EMAIL_PASSWORD=your_email_password
-# DATABASE_URL=your_local_or_render_db_connection_string
 load_dotenv()
 
 app = Flask(__name__)
-# Allow requests specifically from your known front-end domain in production
-# For development or simpler setups, allowing all origins might be okay initially.
-# Replace "*" with your actual front-end URL in production for better security.
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}) # Allow requests from your frontend
 
 # --- Configuration from Environment Variables ---
-SENDER_EMAIL = "info@bimora.org" # Consider making this an env var too
+SENDER_EMAIL = "info@bimora.org"
 SENDER_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.hostinger.com") # Default to Hostinger
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587)) # Default port
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.hostinger.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 # --- Helper Functions ---
 
 def print_error(*args, **kwargs):
     """Prints messages to stderr for logging purposes."""
+    # Now sys is defined
     print(*args, file=sys.stderr, **kwargs)
 
 def get_db_connection():
@@ -63,14 +59,10 @@ def create_licenses_table_if_not_exists():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Added UNIQUE constraint on license_key as well
-        # Added expires_at column (nullable)
-        # Added activated_machine_id (nullable, could add unique constraint if needed)
-        # Added last_validated_at (nullable)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS licenses (
                 id SERIAL PRIMARY KEY,
-                license_key VARCHAR(36) UNIQUE NOT NULL, -- Increased length for UUIDs
+                license_key VARCHAR(36) UNIQUE NOT NULL,
                 name VARCHAR(255) NOT NULL,
                 email VARCHAR(255) UNIQUE NOT NULL,
                 company VARCHAR(255),
@@ -82,7 +74,6 @@ def create_licenses_table_if_not_exists():
                 expires_at TIMESTAMP WITH TIME ZONE NULL
             );
         """)
-        # Optional: Add indexes for faster lookups
         cur.execute("CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses (license_key);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses (email);")
         conn.commit()
@@ -90,14 +81,14 @@ def create_licenses_table_if_not_exists():
         print_error("Ensured 'licenses' table exists.")
     except Exception as e:
         print_error(f"Error creating/checking licenses table: {e}")
-        if conn: conn.rollback() # Rollback if table creation failed
+        if conn: conn.rollback()
     finally:
         if conn: conn.close()
 
 def generate_license_key():
     """Generates a unique license key (UUID4)."""
     import uuid
-    return str(uuid.uuid4()) # Use UUID for better uniqueness
+    return str(uuid.uuid4())
 
 def send_email(receiver_email, license_key):
     """Sends the license key via email."""
@@ -108,7 +99,6 @@ def send_email(receiver_email, license_key):
          print_error("SENDER_EMAIL not configured. Cannot send email.")
          raise ValueError("Sender email configuration incomplete.")
 
-    # Improved email body
     body = f"""Hi there,
 
 Thank you for your interest in Clash Pilot!
@@ -129,11 +119,10 @@ info@bimora.org
     msg['To'] = receiver_email
 
     try:
-        # Use context manager for SMTP connection
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo() # Identify client to ESMTP server
-            server.starttls() # Secure the connection
-            server.ehlo() # Re-identify client over TLS
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
             server.send_message(msg)
         print_error(f"License key sent successfully to {receiver_email}")
@@ -155,48 +144,37 @@ def generate_license():
 
     name = data.get('name')
     email = data.get('email')
-    company = data.get('company') # Optional now
-    purpose = data.get('purpose') # Optional now
+    company = data.get('company')
+    purpose = data.get('purpose')
 
-    if not name or not email: # Name and email are mandatory
-        return jsonify({'error': 'Missing required fields (name, email).'}), 400
+    if not name or not email: return jsonify({'error': 'Missing required fields (name, email).'}), 400
 
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Check if email already exists
         cur.execute("SELECT license_key FROM licenses WHERE email = %s", (email,))
         existing = cur.fetchone()
         if existing:
-            # Option 1: Return error
-            # return jsonify({'error': 'Email address already has a license key.'}), 409
-
-            # Option 2: Resend existing key (more user-friendly for lost keys)
             existing_key = existing[0]
             print_error(f"Email {email} already exists with key {existing_key}. Resending.")
             try:
                 send_email(email, existing_key)
                 return jsonify({'message': f'License key for {email} already existed and has been re-sent.'}), 200
             except Exception as send_err:
-                 # If resend fails, report that specifically
                  return jsonify({'error': f'Email already exists, but failed to resend key: {send_err}'}), 500
             finally:
                  cur.close()
                  conn.close()
 
-        # If email doesn't exist, generate a NEW unique key
         while True:
             license_key = generate_license_key()
             cur.execute("SELECT 1 FROM licenses WHERE license_key = %s", (license_key,))
-            if cur.fetchone() is None: break # Key is unique
+            if cur.fetchone() is None: break
 
-        # --- Option: Set an expiration date (e.g., 1 year from now) ---
-        # expiration_date = datetime.now(timezone.utc) + timedelta(days=365)
-        expiration_date = None # Set to None for no expiration initially
+        expiration_date = None # Set expiration logic here if needed
 
-        # Insert new license record
         insert_query = sql.SQL("""
             INSERT INTO licenses (license_key, name, email, company, purpose, is_active, expires_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s);
@@ -205,25 +183,25 @@ def generate_license():
         conn.commit()
         print_error(f"License key {license_key} generated and stored for {email}.")
 
-        # Send email with the new key
         send_email(email, license_key)
 
-        return jsonify({'message': 'License key generated and sent successfully.'}), 201 # 201 Created
+        return jsonify({'message': 'License key generated and sent successfully.'}), 201
 
     except psycopg2.Error as db_err:
-        print_error(f"Database Error in /generate-license: {db_err}")
+        print_error(f"Database Error in /generate-license: {db_err}"); print_error(traceback.format_exc())
         if conn: conn.rollback()
         return jsonify({'error': f'Database operation failed: {db_err}'}), 500
     except ConnectionError as conn_err:
-         print_error(f"Connection Error in /generate-license: {conn_err}")
+         print_error(f"Connection Error in /generate-license: {conn_err}"); print_error(traceback.format_exc())
          if conn: conn.rollback()
          return jsonify({'error': str(conn_err)}), 503
     except Exception as e:
-        print_error(f"General Error in /generate-license: {e}")
-        print_error(traceback.format_exc())
+        print_error(f"General Error in /generate-license: {e}"); print_error(traceback.format_exc())
         if conn: conn.rollback()
         return jsonify({'error': f'An unexpected error occurred: {e}'}), 500
     finally:
+        # Ensure cursor is closed before connection
+        if 'cur' in locals() and cur and not cur.closed: cur.close()
         if conn: conn.close()
 
 
@@ -240,11 +218,11 @@ def validate_license():
         return jsonify({'status': 'invalid', 'reason': 'Missing license_key or machine_id.'}), 400
 
     conn = None
+    cur = None # Define cursor outside try
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Fetch license details including activation status and machine ID
         select_query = """
             SELECT id, is_active, activated_machine_id, expires_at
             FROM licenses
@@ -262,20 +240,12 @@ def validate_license():
             return jsonify({'status': 'invalid', 'reason': 'License key is inactive.'}), 403
 
         if expires_at is not None and datetime.now(timezone.utc) > expires_at:
-            # Optionally deactivate the key permanently if expired
-            # update_expiry_query = "UPDATE licenses SET is_active = FALSE WHERE id = %s;"
-            # cur.execute(update_expiry_query, (license_id,))
-            # conn.commit()
             return jsonify({'status': 'expired', 'reason': 'License key has expired.'}), 403
 
-        # --- Activation Logic ---
         current_time = datetime.now(timezone.utc)
         if activated_machine is None:
-            # First time validation for this key -> Activate on this machine
             update_activation_query = """
-                UPDATE licenses
-                SET activated_machine_id = %s, last_validated_at = %s
-                WHERE id = %s;
+                UPDATE licenses SET activated_machine_id = %s, last_validated_at = %s WHERE id = %s;
             """
             cur.execute(update_activation_query, (machine_id, current_time, license_id))
             conn.commit()
@@ -283,14 +253,12 @@ def validate_license():
             return jsonify({'status': 'valid', 'message': 'License activated successfully.'}), 200
 
         elif activated_machine == machine_id:
-            # Already activated on the correct machine -> Validate
             update_last_validated_query = "UPDATE licenses SET last_validated_at = %s WHERE id = %s;"
             cur.execute(update_last_validated_query, (current_time, license_id))
             conn.commit()
             print_error(f"License key {license_key} validated successfully for machine {machine_id}")
             return jsonify({'status': 'valid'}), 200
         else:
-            # Activated on a different machine
             print_error(f"License key {license_key} validation failed. Already activated on machine '{activated_machine}', attempted by '{machine_id}'")
             return jsonify({'status': 'invalid', 'reason': 'License key already activated on another machine.'}), 403
 
@@ -298,7 +266,7 @@ def validate_license():
         print_error(f"Database Error in /validate-license: {db_err}"); print_error(traceback.format_exc())
         if conn: conn.rollback()
         return jsonify({'status': 'error', 'reason': 'License server database error.'}), 500
-    except ConnectionError as conn_err: # Catch connection errors from get_db_connection
+    except ConnectionError as conn_err:
          print_error(f"Connection Error in /validate-license: {conn_err}"); print_error(traceback.format_exc())
          return jsonify({'status': 'error', 'reason': 'Could not connect to license server.'}), 503
     except Exception as e:
@@ -306,28 +274,21 @@ def validate_license():
         if conn: conn.rollback()
         return jsonify({'status': 'error', 'reason': 'An unexpected error occurred on the license server.'}), 500
     finally:
-        if cur: cur.close() # Close cursor if it was opened
+        if cur: cur.close()
         if conn: conn.close()
-
 
 # --- Entry Point & Setup ---
 if __name__ == '__main__':
     print_error("Starting license API...")
-    # Ensure table exists before starting the server
-    # Wrap in try-except in case DB isn't ready immediately on startup
     try:
         create_licenses_table_if_not_exists()
-        print_error("License API setup complete. Ready for Gunicorn.")
+        print_error("License API setup complete. Ready for Gunicorn or local run.")
     except ConnectionError as start_conn_err:
         print_error(f"FATAL: Could not connect to database on startup: {start_conn_err}")
-        # Optionally exit if DB connection is absolutely mandatory for startup
-        # sys.exit(1)
     except Exception as start_err:
-        print_error(f"FATAL: Error during initial table setup: {start_err}")
-        print_error(traceback.format_exc())
-        # sys.exit(1)
+        print_error(f"FATAL: Error during initial table setup: {start_err}"); print_error(traceback.format_exc())
 
-    # For local testing ONLY (use Gunicorn in render.yaml for deployment)
-    # app.run(host='0.0.0.0', port=10000, debug=True) # Enable debug for local testing
+    # For local testing ONLY: uncomment the line below and run 'python app.py'
+    # app.run(host='0.0.0.0', port=10000, debug=True)
 
 # --- END OF app.py ---
