@@ -1,29 +1,32 @@
 from flask import Flask, request, jsonify
-import hashlib
-import os
+from flask_cors import CORS
+import uuid
 
 app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return 'ClashPilot License API is running!'
+CORS(app)  # يسمح بالاتصال من أي مصدر (مثل موقعك)
 
 @app.route('/generate-license', methods=['POST'])
 def generate_license():
-    try:
-        data = request.get_json()
-        email = data.get("email")
-        if not email:
-            return jsonify({"error": "Email is required."}), 400
+    data = request.json
 
-        # Example: create a hashed license key from the email (simple logic for demo)
-        raw = f"{email}-clashpilot-demo"
-        license_key = hashlib.sha256(raw.encode()).hexdigest()[:20]  # Take first 20 characters
+    # استخراج البيانات من JSON
+    name = data.get('name')
+    email = data.get('email')
+    company = data.get('company')
+    position = data.get('position')
 
-        return jsonify({"license_key": license_key})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # التحقق من أن جميع الحقول موجودة
+    if not all([name, email, company, position]):
+        return jsonify({"error": "All fields (name, email, company, position) are required."}), 400
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # توليد مفتاح ترخيص فريد (UUID)
+    license_key = str(uuid.uuid4()).upper()
+
+    # (اختياري) سجل البيانات - مثال: طباعتها في الـ Console
+    print(f"New License Request:\nName: {name}\nEmail: {email}\nCompany: {company}\nPosition: {position}\nLicense: {license_key}")
+
+    # إرسال المفتاح للعميل
+    return jsonify({"license_key": license_key})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
