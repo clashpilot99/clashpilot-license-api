@@ -1,4 +1,4 @@
-# --- START OF app.py (v2 - Database Integration) ---
+# --- START OF app.py (v2.1 - Includes /validate-license endpoint) ---
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import random
@@ -6,194 +6,328 @@ import string
 import smtplib
 import os
 from email.mime.text import MIMEText
-import psycopg2 # <-- استيراد مكتبة PostgreSQL
-from psycopg2 import sql # <-- لاستعلامات SQL الآمنة
-from datetime import datetime, timedelta # <-- لاستخدام التواريخ (لتاريخ الإنشاء وانتهاء الصلاحية المحتمل)
-from urllib.parse import urlparse # <-- لتحليل رابط قاعدة البيانات
+import psycopg2 # For PostgreSQL interaction
+from psycopg2 import sql # For safe SQL query construction
+from datetime import datetime, timedelta, timezone # For timestamps
+from urllib.parse import urlparse # For parsing DATABASE_URL
+import traceback # For detailed error logging
+from dotenv import load_dotenv # Optional: for local development to load .env file
+
+# --- Load environment variables from .env file for local development ---
+# Create a .env file in the same directory with:
+# EMAIL_PASSWORD=your_email_password
+# DATABASE_URL=your_local_or_render_db_connection_string
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app) # السماح بالطلبات من مصادر مختلفة (مثل صفحة HTML)
+# Allow requests specifically from your known front-end domain in production
+# For development or simpler setups, allowing all origins might be okay initially.
+# Replace "*" with your actual front-end URL in production for better security.
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- إعدادات البريد الإلكتروني وقاعدة البيانات ---
-SENDER_EMAIL = "info@bimora.org"
-SENDER_PASSWORD = os.environ.get("EMAIL_PASSWORD") # من متغيرات البيئة في Render
-
-# --- هام: الحصول على رابط قاعدة البيانات من متغيرات البيئة ---
-# سيتم تعيين هذا المتغير في لوحة تحكم Render باستخدام Internal Connection String
+# --- Configuration from Environment Variables ---
+SENDER_EMAIL = "info@bimora.org" # Consider making this an env var too
+SENDER_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.hostinger.com") # Default to Hostinger
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587)) # Default port
 
-# --- وظائف مساعدة ---
+# --- Helper Functions ---
+
+def print_error(*args, **kwargs):
+    """Prints messages to stderr for logging purposes."""
+    print(*args, file=sys.stderr, **kwargs)
 
 def get_db_connection():
-    """إنشاء اتصال بقاعدة بيانات PostgreSQL."""
+    """Establishes a connection to the PostgreSQL database."""
+    if not DATABASE_URL:
+        print_error("FATAL: DATABASE_URL environment variable not set.")
+        raise ConnectionError("Database configuration is missing.")
     try:
-        # تحليل DATABASE_URL للحصول على المكونات
         result = urlparse(DATABASE_URL)
-        username = result.username
-        password = result.password
-        database = result.path[1:] # إزالة الـ / من البداية
-        hostname = result.hostname
-        port = result.port
-
         conn = psycopg2.connect(
-            dbname=database,
-            user=username,
-            password=password,
-            host=hostname,
-            port=port
+            dbname=result.path[1:],
+            user=result.username,
+            password=result.password,
+            host=result.hostname,
+            port=result.port
         )
         return conn
     except Exception as e:
         print_error(f"Error connecting to database: {e}")
-        # يمكنك هنا إما إرجاع None أو إثارة الخطأ للسماح للنقاط النهائية بمعالجته
         raise ConnectionError(f"Could not connect to the database: {e}")
 
 def create_licenses_table_if_not_exists():
-    """إنشاء جدول التراخيص إذا لم يكن موجودًا."""
-    conn = None # تأكد من تعريف conn قبل try
+    """Creates the licenses table in the database if it doesn't already exist."""
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Added UNIQUE constraint on license_key as well
+        # Added expires_at column (nullable)
+        # Added activated_machine_id (nullable, could add unique constraint if needed)
+        # Added last_validated_at (nullable)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS licenses (
                 id SERIAL PRIMARY KEY,
-                license_key VARCHAR(16) UNIQUE NOT NULL,
+                license_key VARCHAR(36) UNIQUE NOT NULL, -- Increased length for UUIDs
                 name VARCHAR(255) NOT NULL,
                 email VARCHAR(255) UNIQUE NOT NULL,
                 company VARCHAR(255),
                 purpose TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 is_active BOOLEAN DEFAULT TRUE,
-                activated_machine_id VARCHAR(255) NULL, -- لتتبع أول جهاز تم التفعيل عليه
-                last_validated_at TIMESTAMP NULL,
-                expires_at TIMESTAMP NULL -- يمكنك إضافة تاريخ انتهاء هنا لاحقًا
+                activated_machine_id VARCHAR(255) NULL,
+                last_validated_at TIMESTAMP WITH TIME ZONE NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NULL
             );
         """)
+        # Optional: Add indexes for faster lookups
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses (license_key);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses (email);")
         conn.commit()
         cur.close()
         print_error("Ensured 'licenses' table exists.")
     except Exception as e:
         print_error(f"Error creating/checking licenses table: {e}")
+        if conn: conn.rollback() # Rollback if table creation failed
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
-def generate_license_key(length=16):
-    """توليد مفتاح ترخيص سداسي عشري فريد."""
-    # يمكن استخدام UUID هنا لمزيد من الفرادة:
-    # import uuid
-    # return str(uuid.uuid4())
-    # ولكن لنلتزم بـ 16 حرف سداسي عشري الآن
-    return ''.join(random.choices(string.hexdigits.lower(), k=length))
+def generate_license_key():
+    """Generates a unique license key (UUID4)."""
+    import uuid
+    return str(uuid.uuid4()) # Use UUID for better uniqueness
 
 def send_email(receiver_email, license_key):
-    """إرسال البريد الإلكتروني بمفتاح الترخيص."""
+    """Sends the license key via email."""
     if not SENDER_PASSWORD:
         print_error("EMAIL_PASSWORD environment variable not set. Cannot send email.")
         raise ValueError("Email configuration incomplete on server.")
+    if not SENDER_EMAIL:
+         print_error("SENDER_EMAIL not configured. Cannot send email.")
+         raise ValueError("Sender email configuration incomplete.")
 
-    msg = MIMEText(f"Thank you for your interest in Clash Pilot!\n\nYour License Key: {license_key}\n\nPlease keep this key safe.\n\nBest regards,\nThe BIMORA Team")
+    # Improved email body
+    body = f"""Hi there,
+
+Thank you for your interest in Clash Pilot!
+
+Your License Key is: {license_key}
+
+Please keep this key safe and use it to activate the add-in within Revit.
+
+If you have any questions, feel free to reply to this email.
+
+Best regards,
+The BIMORA Team
+info@bimora.org
+"""
+    msg = MIMEText(body)
     msg['Subject'] = 'Your Clash Pilot License Key'
     msg['From'] = SENDER_EMAIL
     msg['To'] = receiver_email
 
     try:
-        with smtplib.SMTP('smtp.hostinger.com', 587) as server:
-            server.starttls()
+        # Use context manager for SMTP connection
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo() # Identify client to ESMTP server
+            server.starttls() # Secure the connection
+            server.ehlo() # Re-identify client over TLS
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
             server.send_message(msg)
         print_error(f"License key sent successfully to {receiver_email}")
     except smtplib.SMTPAuthenticationError as e:
-        print_error(f"SMTP Authentication Error: {e}. Check EMAIL_PASSWORD.")
+        print_error(f"SMTP Authentication Error: {e}. Check SENDER_EMAIL ({SENDER_EMAIL}) and EMAIL_PASSWORD configuration.")
         raise ConnectionError("Failed to authenticate with email server.")
     except Exception as e:
         print_error(f"Error sending email to {receiver_email}: {e}")
+        print_error(traceback.format_exc())
         raise ConnectionError(f"Failed to send email: {e}")
 
-# --- نقاط نهاية الـ API ---
+# --- API Endpoints ---
 
 @app.route('/generate-license', methods=['POST'])
 def generate_license():
-    """نقطة نهاية لتوليد وتخزين وإرسال مفتاح ترخيص جديد."""
+    """Endpoint to generate, store, and email a new license key."""
     data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Invalid JSON data received.'}), 400
+    if not data: return jsonify({'error': 'Invalid JSON data received.'}), 400
 
     name = data.get('name')
     email = data.get('email')
-    company = data.get('company')
-    purpose = data.get('purpose')
+    company = data.get('company') # Optional now
+    purpose = data.get('purpose') # Optional now
 
-    if not all([name, email]): # جعل الشركة والغرض اختياريين قليلاً
+    if not name or not email: # Name and email are mandatory
         return jsonify({'error': 'Missing required fields (name, email).'}), 400
 
-    conn = None # تأكد من تعريف conn قبل try
+    conn = None
     try:
-        # 1. توليد مفتاح فريد (تحقق من عدم وجوده مسبقًا - نادر ولكنه ممكن)
         conn = get_db_connection()
         cur = conn.cursor()
+
+        # Check if email already exists
+        cur.execute("SELECT license_key FROM licenses WHERE email = %s", (email,))
+        existing = cur.fetchone()
+        if existing:
+            # Option 1: Return error
+            # return jsonify({'error': 'Email address already has a license key.'}), 409
+
+            # Option 2: Resend existing key (more user-friendly for lost keys)
+            existing_key = existing[0]
+            print_error(f"Email {email} already exists with key {existing_key}. Resending.")
+            try:
+                send_email(email, existing_key)
+                return jsonify({'message': f'License key for {email} already existed and has been re-sent.'}), 200
+            except Exception as send_err:
+                 # If resend fails, report that specifically
+                 return jsonify({'error': f'Email already exists, but failed to resend key: {send_err}'}), 500
+            finally:
+                 cur.close()
+                 conn.close()
+
+        # If email doesn't exist, generate a NEW unique key
         while True:
             license_key = generate_license_key()
             cur.execute("SELECT 1 FROM licenses WHERE license_key = %s", (license_key,))
-            if cur.fetchone() is None:
-                break # المفتاح فريد
-        
-        # 2. تخزين بيانات الترخيص في قاعدة البيانات
-        insert_query = sql.SQL("""
-            INSERT INTO licenses (license_key, name, email, company, purpose, is_active)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (email) DO NOTHING; -- لا تسمح بنفس البريد الإلكتروني مرتين (أو يمكنك تحديث المفتاح؟)
-        """)
-        cur.execute(insert_query, (license_key, name, email, company, purpose, True))
-        
-        # التحقق مما إذا تم الإدراج (إذا لم يتم بسبب تعارض البريد الإلكتروني)
-        if cur.rowcount == 0:
-             cur.close()
-             conn.close()
-             print_error(f"Attempted to generate license for existing email: {email}")
-             # يمكنك إما إرسال المفتاح القديم أو إرجاع خطأ
-             return jsonify({'error': 'Email address already has a license key.'}), 409 # 409 Conflict
+            if cur.fetchone() is None: break # Key is unique
 
-        conn.commit() # حفظ التغييرات في قاعدة البيانات
+        # --- Option: Set an expiration date (e.g., 1 year from now) ---
+        # expiration_date = datetime.now(timezone.utc) + timedelta(days=365)
+        expiration_date = None # Set to None for no expiration initially
+
+        # Insert new license record
+        insert_query = sql.SQL("""
+            INSERT INTO licenses (license_key, name, email, company, purpose, is_active, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """)
+        cur.execute(insert_query, (license_key, name, email, company, purpose, True, expiration_date))
+        conn.commit()
         print_error(f"License key {license_key} generated and stored for {email}.")
 
-        # 3. إرسال البريد الإلكتروني
+        # Send email with the new key
         send_email(email, license_key)
 
         return jsonify({'message': 'License key generated and sent successfully.'}), 201 # 201 Created
 
-    except psycopg2.Error as db_err: # التعامل مع أخطاء قاعدة البيانات بشكل محدد
-        print_error(f"Database Error: {db_err}")
-        if conn: conn.rollback() # التراجع عن التغييرات في حالة الخطأ
+    except psycopg2.Error as db_err:
+        print_error(f"Database Error in /generate-license: {db_err}")
+        if conn: conn.rollback()
         return jsonify({'error': f'Database operation failed: {db_err}'}), 500
-    except ConnectionError as conn_err: # التعامل مع أخطاء الاتصال (بالبريد أو قاعدة البيانات)
-         print_error(f"Connection Error: {conn_err}")
+    except ConnectionError as conn_err:
+         print_error(f"Connection Error in /generate-license: {conn_err}")
          if conn: conn.rollback()
-         return jsonify({'error': str(conn_err)}), 503 # 503 Service Unavailable
-    except Exception as e: # التعامل مع الأخطاء العامة الأخرى
+         return jsonify({'error': str(conn_err)}), 503
+    except Exception as e:
         print_error(f"General Error in /generate-license: {e}")
         print_error(traceback.format_exc())
         if conn: conn.rollback()
         return jsonify({'error': f'An unexpected error occurred: {e}'}), 500
     finally:
-        # تأكد دائمًا من إغلاق الاتصال
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
-# --- الخطوة التالية: إضافة نقطة نهاية /validate-license ---
-# @app.route('/validate-license', methods=['POST'])
-# def validate_license():
-#     # ... (سيتم إضافتها في الخطوة التالية) ...
-#     pass
+@app.route('/validate-license', methods=['POST'])
+def validate_license():
+    """Endpoint to validate a license key against a machine ID."""
+    data = request.get_json()
+    if not data: return jsonify({'status': 'invalid', 'reason': 'No data received.'}), 400
+
+    license_key = data.get('license_key')
+    machine_id = data.get('machine_id')
+
+    if not license_key or not machine_id:
+        return jsonify({'status': 'invalid', 'reason': 'Missing license_key or machine_id.'}), 400
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Fetch license details including activation status and machine ID
+        select_query = """
+            SELECT id, is_active, activated_machine_id, expires_at
+            FROM licenses
+            WHERE license_key = %s;
+        """
+        cur.execute(select_query, (license_key,))
+        result_row = cur.fetchone()
+
+        if result_row is None:
+            return jsonify({'status': 'invalid', 'reason': 'License key not found.'}), 404
+
+        license_id, is_active, activated_machine, expires_at = result_row
+
+        if not is_active:
+            return jsonify({'status': 'invalid', 'reason': 'License key is inactive.'}), 403
+
+        if expires_at is not None and datetime.now(timezone.utc) > expires_at:
+            # Optionally deactivate the key permanently if expired
+            # update_expiry_query = "UPDATE licenses SET is_active = FALSE WHERE id = %s;"
+            # cur.execute(update_expiry_query, (license_id,))
+            # conn.commit()
+            return jsonify({'status': 'expired', 'reason': 'License key has expired.'}), 403
+
+        # --- Activation Logic ---
+        current_time = datetime.now(timezone.utc)
+        if activated_machine is None:
+            # First time validation for this key -> Activate on this machine
+            update_activation_query = """
+                UPDATE licenses
+                SET activated_machine_id = %s, last_validated_at = %s
+                WHERE id = %s;
+            """
+            cur.execute(update_activation_query, (machine_id, current_time, license_id))
+            conn.commit()
+            print_error(f"License key {license_key} activated for machine {machine_id}")
+            return jsonify({'status': 'valid', 'message': 'License activated successfully.'}), 200
+
+        elif activated_machine == machine_id:
+            # Already activated on the correct machine -> Validate
+            update_last_validated_query = "UPDATE licenses SET last_validated_at = %s WHERE id = %s;"
+            cur.execute(update_last_validated_query, (current_time, license_id))
+            conn.commit()
+            print_error(f"License key {license_key} validated successfully for machine {machine_id}")
+            return jsonify({'status': 'valid'}), 200
+        else:
+            # Activated on a different machine
+            print_error(f"License key {license_key} validation failed. Already activated on machine '{activated_machine}', attempted by '{machine_id}'")
+            return jsonify({'status': 'invalid', 'reason': 'License key already activated on another machine.'}), 403
+
+    except psycopg2.Error as db_err:
+        print_error(f"Database Error in /validate-license: {db_err}"); print_error(traceback.format_exc())
+        if conn: conn.rollback()
+        return jsonify({'status': 'error', 'reason': 'License server database error.'}), 500
+    except ConnectionError as conn_err: # Catch connection errors from get_db_connection
+         print_error(f"Connection Error in /validate-license: {conn_err}"); print_error(traceback.format_exc())
+         return jsonify({'status': 'error', 'reason': 'Could not connect to license server.'}), 503
+    except Exception as e:
+        print_error(f"General Error in /validate-license: {e}"); print_error(traceback.format_exc())
+        if conn: conn.rollback()
+        return jsonify({'status': 'error', 'reason': 'An unexpected error occurred on the license server.'}), 500
+    finally:
+        if cur: cur.close() # Close cursor if it was opened
+        if conn: conn.close()
 
 
-# --- تشغيل التطبيق وإنشاء الجدول عند البدء ---
+# --- Entry Point & Setup ---
 if __name__ == '__main__':
     print_error("Starting license API...")
-    create_licenses_table_if_not_exists() # تأكد من وجود الجدول عند بدء تشغيل الخادم
-    # استخدام Gunicorn بدلاً من app.run للإنتاج (يتم تكوينه في render.yaml)
-    # app.run(host='0.0.0.0', port=10000) # فقط للاختبار المحلي
-    print_error("License API setup complete. Waiting for requests...")
+    # Ensure table exists before starting the server
+    # Wrap in try-except in case DB isn't ready immediately on startup
+    try:
+        create_licenses_table_if_not_exists()
+        print_error("License API setup complete. Ready for Gunicorn.")
+    except ConnectionError as start_conn_err:
+        print_error(f"FATAL: Could not connect to database on startup: {start_conn_err}")
+        # Optionally exit if DB connection is absolutely mandatory for startup
+        # sys.exit(1)
+    except Exception as start_err:
+        print_error(f"FATAL: Error during initial table setup: {start_err}")
+        print_error(traceback.format_exc())
+        # sys.exit(1)
 
-# --- END OF app.py (v2) ---
+    # For local testing ONLY (use Gunicorn in render.yaml for deployment)
+    # app.run(host='0.0.0.0', port=10000, debug=True) # Enable debug for local testing
+
+# --- END OF app.py ---
