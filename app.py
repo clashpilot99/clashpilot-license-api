@@ -1,64 +1,64 @@
-import os
-import smtplib
-import uuid
-from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import smtplib
+from email.message import EmailMessage
+import secrets
+import os
 
 app = Flask(__name__)
-CORS(app)  # للسماح بالطلبات من موقعك
+CORS(app)
 
-SENDER_EMAIL = "info@bimora.org"
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+# إعدادات بريد Outlook / Microsoft 365
+EMAIL_ADDRESS = "info@bimora.org"
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # ضع كلمة المرور كمتغير بيئة في Render
+SMTP_SERVER = "smtp.office365.com"
+SMTP_PORT = 587  # Outlook يفضل STARTTLS على هذا البورت
 
-@app.route("/")
-def index():
-    return "Clash Pilot License API is running."
-
-@app.route("/generate-license", methods=["POST"])
+@app.route('/generate-license', methods=['POST'])
 def generate_license():
-    try:
-        data = request.get_json()
-        name = data.get("name")
-        email = data.get("email")
-        company = data.get("company")
-        position = data.get("position")
+    data = request.get_json()
+    name = data.get('name')
+    email = data.get('email')
+    company = data.get('company')
+    position = data.get('position')
 
-        if not all([name, email, company, position]):
-            return jsonify({"error": "Missing required fields."}), 400
+    # تحقق من المدخلات
+    if not all([name, email, company, position]):
+        return jsonify({"error": "Missing required fields."}), 400
 
-        # توليد مفتاح ترخيص
-        license_key = uuid.uuid4().hex[:20]
+    # توليد مفتاح الرخصة العشوائي
+    license_key = secrets.token_hex(8)
 
-        # إعداد الرسالة
-        subject = "Your Clash Pilot License Key"
-        body = f"""
+    # إنشاء رسالة البريد
+    msg = EmailMessage()
+    msg['Subject'] = "Your Clash Pilot License Key"
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = email
+    msg.set_content(f"""
 Hello {name},
 
-Thank you for requesting a trial license for Clash Pilot.
+✅ Thank you for requesting a free Clash Pilot license.
 
-Here is your license key: {license_key}
+🔐 Your License Key: {license_key}
 
-Please enter this key in the Clash Pilot plugin inside Revit.
+Company: {company}
+Position: {position}
+
+Please copy and paste this license key inside the Clash Pilot Revit plugin when asked.
 
 Best regards,  
 BIMora Team
-"""
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = email
+info@bimora.org
+""")
 
-        # إرسال الإيميل
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(SENDER_EMAIL, EMAIL_PASSWORD)
-            server.sendmail(SENDER_EMAIL, email, msg.as_string())
-
-        return jsonify({"license_key": license_key})
-
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.starttls()  # Start TLS encryption
+            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        return jsonify({"license_key": license_key}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # المنفذ المناسب لـ Render
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=10000)
