@@ -1,77 +1,50 @@
-import os
-import smtplib
-import string
-import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import random
+import string
+import smtplib
+import os
 from email.mime.text import MIMEText
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-def generate_license_key(length=16):
-    chars = string.ascii_letters + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+SENDER_EMAIL = "info@bimora.org"
+SENDER_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 
-def send_email(recipient_email, license_key, full_name, company_name, position):
-    sender_email = "info@bimora.org"
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    smtp_server = "smtp.hostinger.com"
-    smtp_port = 465
+def generate_license_key():
+    return ''.join(random.choices(string.hexdigits.lower(), k=16))
 
-    subject = "Your Clash Pilot License Key"
-    body = f"""
-    Hello {full_name},
+def send_email(receiver_email, license_key):
+    msg = MIMEText(f"Your Clash Pilot License Key: {license_key}")
+    msg['Subject'] = 'Clash Pilot License Key'
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = receiver_email
 
-    Thank you for requesting a license key for Clash Pilot.
-    
-    🎫 Your License Key: {license_key}
+    with smtplib.SMTP('smtp.hostinger.com', 587) as server:
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
 
-    📌 Info Provided:
-    - Company: {company_name}
-    - Position: {position}
-    - Email: {recipient_email}
-
-    Please keep this key safe and use it in the plugin settings.
-
-    Regards,
-    Clash Pilot Team
-    """
-
-    message = MIMEText(body)
-    message['Subject'] = subject
-    message['From'] = sender_email
-    message['To'] = recipient_email
-
-    try:
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, recipient_email, message.as_string())
-    except Exception as e:
-        raise Exception(f"Failed to send email: {str(e)}")
-
-@app.route("/generate-license", methods=["POST"])
+@app.route('/generate-license', methods=['POST'])
 def generate_license():
     data = request.get_json()
-    required_fields = ['fullName', 'email', 'companyName', 'position']
-    if not all(field in data and data[field] for field in required_fields):
-        return jsonify({"error": "Missing required fields."}), 400
+    name = data.get('name')
+    email = data.get('email')
+    company = data.get('company')
+    purpose = data.get('purpose')
+
+    if not all([name, email, company, purpose]):
+        return jsonify({'error': 'Missing required fields.'}), 400
+
+    license_key = generate_license_key()
 
     try:
-        license_key = generate_license_key()
-        send_email(
-            recipient_email=data["email"],
-            license_key=license_key,
-            full_name=data["fullName"],
-            company_name=data["companyName"],
-            position=data["position"]
-        )
-        return jsonify({"license_key": license_key})
+        send_email(email, license_key)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    return jsonify({'license_key': license_key})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
