@@ -1,63 +1,64 @@
+import os
+import smtplib
+import uuid
+from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import secrets
-import smtplib
-from email.mime.text import MIMEText
-from os import environ
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # للسماح بالطلبات من موقعك
 
-# إعداد البريد
-EMAIL_ADDRESS = "info@bimora.org"
-EMAIL_PASSWORD = environ.get("EMAIL_PASSWORD")  # من Environment Variables في Render
+SENDER_EMAIL = "info@bimora.org"
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+
+@app.route("/")
+def index():
+    return "Clash Pilot License API is running."
 
 @app.route("/generate-license", methods=["POST"])
 def generate_license():
     try:
         data = request.get_json()
-        full_name = data.get("full_name")
+        name = data.get("name")
         email = data.get("email")
         company = data.get("company")
         position = data.get("position")
 
-        if not all([full_name, email, company, position]):
-            return jsonify({"error": "Missing fields"}), 400
+        if not all([name, email, company, position]):
+            return jsonify({"error": "Missing required fields."}), 400
 
-        # توليد المفتاح العشوائي
-        license_key = secrets.token_hex(8)
+        # توليد مفتاح ترخيص
+        license_key = uuid.uuid4().hex[:20]
 
-        # إعداد رسالة الإيميل
+        # إعداد الرسالة
         subject = "Your Clash Pilot License Key"
         body = f"""
-Hello {full_name},
+Hello {name},
 
-Thank you for trying Clash Pilot!
+Thank you for requesting a trial license for Clash Pilot.
 
-🔐 Your license key is:
-{license_key}
+Here is your license key: {license_key}
+
+Please enter this key in the Clash Pilot plugin inside Revit.
 
 Best regards,  
-Clash Pilot Team  
-www.bimora.org
+BIMora Team
 """
-
         msg = MIMEText(body)
         msg["Subject"] = subject
-        msg["From"] = EMAIL_ADDRESS
+        msg["From"] = SENDER_EMAIL
         msg["To"] = email
 
         # إرسال الإيميل
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            server.send_message(msg)
+            server.login(SENDER_EMAIL, EMAIL_PASSWORD)
+            server.sendmail(SENDER_EMAIL, email, msg.as_string())
 
         return jsonify({"license_key": license_key})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ دعم Render - فتح المنفذ المناسب
 if __name__ == "__main__":
-    port = int(environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))  # المنفذ المناسب لـ Render
     app.run(host="0.0.0.0", port=port)
