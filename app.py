@@ -1,41 +1,63 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import uuid
-import os
+import secrets
 import smtplib
 from email.mime.text import MIMEText
+from os import environ
 
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/generate-license', methods=['POST'])
+# إعداد البريد
+EMAIL_ADDRESS = "info@bimora.org"
+EMAIL_PASSWORD = environ.get("EMAIL_PASSWORD")  # من Environment Variables في Render
+
+@app.route("/generate-license", methods=["POST"])
 def generate_license():
-    data = request.json
-    name = data.get('name')
-    email = data.get('email')
-    company = data.get('company')
-    position = data.get('position')
-
-    if not all([name, email, company, position]):
-        return jsonify({'error': 'Missing data'}), 400
-
-    license_key = uuid.uuid4().hex[:20]
-
     try:
-        send_license_email(email, license_key)
-        return jsonify({'license_key': license_key}), 200
+        data = request.get_json()
+        full_name = data.get("full_name")
+        email = data.get("email")
+        company = data.get("company")
+        position = data.get("position")
+
+        if not all([full_name, email, company, position]):
+            return jsonify({"error": "Missing fields"}), 400
+
+        # توليد المفتاح العشوائي
+        license_key = secrets.token_hex(8)
+
+        # إعداد رسالة الإيميل
+        subject = "Your Clash Pilot License Key"
+        body = f"""
+Hello {full_name},
+
+Thank you for trying Clash Pilot!
+
+🔐 Your license key is:
+{license_key}
+
+Best regards,  
+Clash Pilot Team  
+www.bimora.org
+"""
+
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_ADDRESS
+        msg["To"] = email
+
+        # إرسال الإيميل
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        return jsonify({"license_key": license_key})
+
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-def send_license_email(receiver_email, license_key):
-    sender_email = os.environ.get("EMAIL_USER")
-    sender_password = os.environ.get("EMAIL_PASSWORD")
-
-    message = MIMEText(f"Your Clash Pilot license key is: {license_key}")
-    message['Subject'] = "Clash Pilot License Key"
-    message['From'] = sender_email
-    message['To'] = receiver_email
-
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-        smtp.login(sender_email, sender_password)
-        smtp.sendmail(sender_email, receiver_email, message.as_string())
+# ✅ دعم Render - فتح المنفذ المناسب
+if __name__ == "__main__":
+    port = int(environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
