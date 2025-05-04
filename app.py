@@ -1,59 +1,64 @@
 from flask import Flask, request, jsonify
-import uuid
+from flask_cors import CORS
+import secrets
 import smtplib
+from email.message import EmailMessage
 import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
+CORS(app)  # السماح بالاتصال من موقع خارجي مثل Hostinger
 
-SENDER_EMAIL = "info@bimora.org"
-SENDER_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Secure method
-SMTP_SERVER = "smtp.hostinger.com"
-SMTP_PORT = 587
+# تحميل الإيميل وكلمة المرور من المتغيرات البيئية في Render
+EMAIL_ADDRESS = os.environ.get("EMAIL_USER", "info@bimora.org")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")  # اضفها في Environment Variables
 
-@app.route("/generate-license", methods=["POST"])
+@app.route('/generate-license', methods=['POST'])
 def generate_license():
-    data = request.get_json()
-    name = data.get("name")
-    email = data.get("email")
-    company = data.get("company")
-    position = data.get("position")
-
-    license_key = str(uuid.uuid4())
-
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = "🎉 Your Clash Pilot License Key"
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = email
+        data = request.get_json()
 
-        html_content = f"""<html>
-<body>
-    <h2>Hi {name},</h2>
-    <p>Thanks for requesting your Clash Pilot license!</p>
-    <p><b>Your license key:</b></p>
-    <p style='font-size: 20px; font-weight: bold; color: #007bff;'>{license_key}</p>
-    <hr>
-    <p><b>Company:</b> {company}<br>
-    <b>Position:</b> {position}</p>
-    <p style='color: gray;'>Powered by BIMora - Clash Pilot</p>
-</body>
-</html>
-"""
+        name = data.get('name')
+        email = data.get('email')
+        company = data.get('company')
+        position = data.get('position')
 
-        part = MIMEText(html_content, "html")
-        msg.attach(part)
+        if not all([name, email, company, position]):
+            return jsonify({"error": "Missing required fields"}), 400
 
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            server.sendmail(SENDER_EMAIL, email, msg.as_string())
+        # توليد مفتاح ترخيص عشوائي
+        license_key = secrets.token_hex(8)
 
-        return jsonify({"license_key": license_key}), 200
+        # إعداد البريد
+        msg = EmailMessage()
+        msg['Subject'] = "Your Clash Pilot License Key"
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = email
+        msg.set_content(f"""Hello {name},
+
+Thank you for requesting a Clash Pilot license.
+
+🔐 Your License Key: {license_key}
+
+Company: {company}
+Position: {position}
+
+Use this key to activate your Clash Pilot plugin in Revit.
+
+Best regards,
+Clash Pilot Team - BIMora
+""")
+
+        # إرسال الإيميل
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+
+        # إرجاع المفتاح في JSON
+        return jsonify({"license_key": license_key})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(debug=True)
+# نقطة تشغيل السيرفر محلياً (اختياري)
+if __name__ == '__main__':
+    app.run()
