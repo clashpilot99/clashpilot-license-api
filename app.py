@@ -1,38 +1,61 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
+import uuid
+import json
+import os
+from datetime import datetime, timedelta
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # للسماح للـ HTML في موقعك بالتواصل مع هذا API
 
-# قاعدة بيانات رخص مؤقتة - يمكن لاحقًا ربطها بقاعدة بيانات فعلية
-licenses = {
-    "ABC123-DEMO-MACHINE": {
-        "company": "Demo Co",
-        "start_date": "2025-05-01",
-        "valid_days": 14
-    }
-}
+LICENSE_FILE = "licenses.json"
 
-@app.route("/")
-def index():
-    return "Clash Pilot License API - Online ✅"
+def load_licenses():
+    if os.path.exists(LICENSE_FILE):
+        with open(LICENSE_FILE, "r") as f:
+            return json.load(f)
+    return []
 
-@app.route("/validate", methods=["POST"])
-def validate_license():
+def save_licenses(data):
+    with open(LICENSE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+@app.route("/generate-license", methods=["POST"])
+def generate_license():
     data = request.json
-    machine_id = data.get("machine_id")
+    name = data.get("name")
+    email = data.get("email")
+    country = data.get("country")
+    company = data.get("company")
 
-    if not machine_id or machine_id not in licenses:
-        return jsonify({"status": "invalid", "message": "License not found"}), 403
+    if not email:
+        return jsonify({"status": "error", "message": "Email is required"}), 400
 
-    lic = licenses[machine_id]
-    start = datetime.strptime(lic["start_date"], "%Y-%m-%d")
-    days_used = (datetime.now() - start).days
+    # توليد لايسنس
+    license_key = f"TRIAL-{uuid.uuid4().hex[:12].upper()}"
+    valid_until = (datetime.utcnow() + timedelta(days=14)).strftime("%Y-%m-%d")
 
-    if days_used > lic["valid_days"]:
-        return jsonify({"status": "expired", "message": "License expired"}), 403
+    # حفظه
+    licenses = load_licenses()
+    licenses.append({
+        "name": name,
+        "email": email,
+        "country": country,
+        "company": company,
+        "license_key": license_key,
+        "valid_until": valid_until
+    })
+    save_licenses(licenses)
 
     return jsonify({
-        "status": "valid",
-        "company": lic["company"],
-        "days_left": lic["valid_days"] - days_used
+        "status": "success",
+        "license_key": license_key,
+        "valid_until": valid_until
     })
+
+@app.route("/", methods=["GET"])
+def home():
+    return "ClashPilot License API is running ✅"
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
