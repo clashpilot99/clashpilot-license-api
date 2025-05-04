@@ -1,32 +1,65 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 import uuid
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
-CORS(app)  # يسمح بالاتصال من أي مصدر (مثل موقعك)
+
+# إعدادات البريد الخاص بك (Hostinger SMTP)
+SMTP_SERVER = 'smtp.hostinger.com'
+SMTP_PORT = 587
+SMTP_USER = 'info@bimora.org'
+SMTP_PASSWORD = 'ضع_كلمة_المرور_هنا'  # ⚠️ تأكد أنها آمنة
 
 @app.route('/generate-license', methods=['POST'])
 def generate_license():
-    data = request.json
+    data = request.form if request.form else request.json
 
-    # استخراج البيانات من JSON
     name = data.get('name')
     email = data.get('email')
     company = data.get('company')
     position = data.get('position')
 
-    # التحقق من أن جميع الحقول موجودة
     if not all([name, email, company, position]):
-        return jsonify({"error": "All fields (name, email, company, position) are required."}), 400
+        return jsonify({"error": "Missing required fields"}), 400
 
-    # توليد مفتاح ترخيص فريد (UUID)
-    license_key = str(uuid.uuid4()).upper()
+    # توليد مفتاح الترخيص
+    license_key = str(uuid.uuid4())
 
-    # (اختياري) سجل البيانات - مثال: طباعتها في الـ Console
-    print(f"New License Request:\nName: {name}\nEmail: {email}\nCompany: {company}\nPosition: {position}\nLicense: {license_key}")
+    # إعداد البريد
+    subject = "Your Clash Pilot License Key"
+    body = f"""
+Hello {name},
 
-    # إرسال المفتاح للعميل
+Thanks for requesting a trial license for Clash Pilot.
+
+🔑 Your License Key: {license_key}
+
+Company: {company}
+Position: {position}
+
+You can now paste this license key in the plugin to activate the demo mode.
+
+Regards,  
+BIMora Team
+"""
+
+    # إرسال البريد
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        msg['To'] = email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        return jsonify({"error": f"Email send failed: {str(e)}"}), 500
+
+    # الاستجابة النهائية
     return jsonify({"license_key": license_key})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
